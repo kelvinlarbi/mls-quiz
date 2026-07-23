@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { getStoredAttempt } from "../hooks/useQuizStorage";
+import { useProfile } from "../contexts/ProfileContext";
 
 type FilterMode = "all" | "incorrect" | "correct";
 
@@ -11,7 +11,8 @@ const FILTERS: { key: FilterMode; label: string }[] = [
 
 export function Review() {
   const [filter, setFilter] = useState<FilterMode>("all");
-  const attempt = getStoredAttempt();
+  const { activeProfile } = useProfile();
+  const attempt = activeProfile?.attempt ?? null;
 
   if (!attempt) {
     return (

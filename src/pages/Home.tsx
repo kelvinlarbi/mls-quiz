@@ -1,13 +1,16 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import type { Question, QuizAttempt } from "../hooks/useQuizStorage";
 import {
-  startNewAttempt,
+  createNewAttempt,
   selectAnswer,
   submitBatch,
-  getStoredAttempt,
+  setCurrentBatch,
+  setBatchSize,
+  getTotalBatches,
 } from "../hooks/useQuizStorage";
-
-const BATCH_SIZE = 10;
+import { useProfile } from "../contexts/ProfileContext";
+import { BatchSelector } from "../components/BatchSelector";
+import { SavePointControls } from "../components/SavePointControls";
 
 function sanitizeQuestions(raw: Question[]): Question[] {
   return raw.map((q, idx) => ({
@@ -17,15 +20,19 @@ function sanitizeQuestions(raw: Question[]): Question[] {
 }
 
 export function Home() {
+  const { activeProfile, updateAttempt } = useProfile();
   const [attempt, setAttempt] = useState<QuizAttempt | null>(null);
   const [loading, setLoading] = useState(true);
-  const [currentBatch, setCurrentBatch] = useState(0);
+  const [currentBatch, setCurrentBatchLocal] = useState(0);
   const topRef = useRef<HTMLDivElement>(null);
 
+  // Sync attempt from profile on mount & whenever activeProfile changes
   useEffect(() => {
-    const stored = getStoredAttempt();
-    if (stored) {
-      setAttempt(stored);
+    if (!activeProfile) return;
+
+    if (activeProfile.attempt) {
+      setAttempt(activeProfile.attempt);
+      setCurrentBatchLocal(activeProfile.attempt.currentBatch);
       setLoading(false);
       return;
     }
@@ -34,74 +41,131 @@ export function Home() {
       .then((r) => r.json())
       .then((data: Question[]) => {
         const sanitized = sanitizeQuestions(data);
-        const fresh = startNewAttempt(sanitized);
+        const fresh = createNewAttempt(sanitized);
         setAttempt(fresh);
+        setCurrentBatchLocal(fresh.currentBatch);
+        updateAttempt(fresh);
         setLoading(false);
       })
       .catch((err) => {
         console.error("Failed to load questions:", err);
         setLoading(false);
       });
-  }, []);
+  }, [activeProfile]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const isSubmitted = attempt?.submittedBatches.includes(currentBatch) ?? false;
+  // Persist to profile whenever attempt changes
+  const persistAttempt = useCallback(
+    (updated: QuizAttempt) => {
+      setAttempt(updated);
+      updateAttempt(updated);
+      return updated;
+    },
+    [updateAttempt]
+  );
+
+  const handleBatchChange = useCallback(
+    (batch: number) => {
+      if (!attempt) return;
+      setCurrentBatchLocal(batch);
+      const updated = setCurrentBatch(attempt, batch);
+      persistAttempt(updated);
+      topRef.current?.scrollIntoView({ behavior: "smooth" });
+    },
+    [attempt, persistAttempt]
+  );
+
+  const handleBatchSizeChange = useCallback(
+    (size: number) => {
+      if (!attempt) return;
+      const updated = setBatchSize(attempt, size);
+      persistAttempt(updated);
+    },
+    [attempt, persistAttempt]
+  );
+
+  const isSubmitted =
+    attempt?.submittedBatches.includes(currentBatch) ?? false;
 
   const handleSelect = useCallback(
     (questionIdx: number, optionIdx: number) => {
       if (!attempt || isSubmitted) return;
-      const globalIdx = currentBatch * BATCH_SIZE + questionIdx;
+      const globalIdx = currentBatch * attempt.batchSize + questionIdx;
       const updated = selectAnswer(attempt, globalIdx, optionIdx);
-      setAttempt(updated);
+      persistAttempt(updated);
     },
-    [attempt, isSubmitted, currentBatch]
+    [attempt, isSubmitted, currentBatch, persistAttempt]
   );
 
   const handleSubmit = useCallback(() => {
     if (!attempt) return;
     const updated = submitBatch(attempt, currentBatch);
-    setAttempt(updated);
-  }, [attempt, currentBatch]);
+    persistAttempt(updated);
+  }, [attempt, currentBatch, persistAttempt]);
 
-  const goToBatch = useCallback((batch: number) => {
-    setCurrentBatch(batch);
-    topRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, []);
+  const handleReset = useCallback(
+    (updated: QuizAttempt) => {
+      persistAttempt(updated);
+      setCurrentBatchLocal(updated.currentBatch);
+    },
+    [persistAttempt]
+  );
 
-  if (!attempt) {
+  if (loading) {
     return (
-      <div className="flex items-center justify-center min-h-[60vh] text-slate-500 text-center px-4">
-        {loading ? (
-          <p className="text-lg">Loading questions...</p>
-        ) : (
-          <p className="text-lg">
-            Failed to load questions. Make sure <code className="bg-slate-200 px-1.5 py-0.5 rounded text-sm">questions.json</code> is in the public folder.
-          </p>
-        )}
+      <div className="flex items-center justify-center min-h-[60vh] text-slate-500 px-4">
+        <p className="text-lg">Loading questions...</p>
       </div>
     );
   }
 
-  const totalBatches = Math.ceil(attempt.questions.length / BATCH_SIZE);
+  if (!attempt) {
+    return (
+      <div className="flex items-center justify-center min-h-[60vh] text-slate-500 text-center px-4">
+        <p className="text-lg">
+          Failed to load questions. Make sure{" "}
+          <code className="bg-slate-200 px-1.5 py-0.5 rounded text-sm">questions.json</code> is in the public folder.
+        </p>
+      </div>
+    );
+  }
+
+  const totalBatches = getTotalBatches(attempt.questions.length, attempt.batchSize);
   const batchQuestions = attempt.questions.slice(
-    currentBatch * BATCH_SIZE,
-    (currentBatch + 1) * BATCH_SIZE
+    currentBatch * attempt.batchSize,
+    (currentBatch + 1) * attempt.batchSize
   );
 
   const batchAnswered = batchQuestions.reduce(
-    (acc, _, idx) => acc + (attempt.answers[currentBatch * BATCH_SIZE + idx] !== null ? 1 : 0),
+    (acc, _, idx) =>
+      acc + (attempt.answers[currentBatch * attempt.batchSize + idx] !== null ? 1 : 0),
     0
   );
   const batchProgress = Math.round((batchAnswered / batchQuestions.length) * 100);
   const batchCorrect = batchQuestions.reduce(
     (acc, q, idx) => {
-      const ans = attempt.answers[currentBatch * BATCH_SIZE + idx];
+      const ans = attempt.answers[currentBatch * attempt.batchSize + idx];
       return acc + (isSubmitted && ans === q.correctOptionIndex ? 1 : 0);
     },
     0
   );
 
   return (
-    <div ref={topRef} className="space-y-6">
+    <div ref={topRef} className="space-y-5">
+      {/* Top toolbar */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <BatchSelector
+          attempt={attempt}
+          currentBatch={currentBatch}
+          onSelect={handleBatchChange}
+          onBatchSizeChange={handleBatchSizeChange}
+        />
+        <SavePointControls
+          attempt={attempt}
+          currentBatch={currentBatch}
+          onReset={handleReset}
+        />
+      </div>
+
       {/* Header Stat Bar */}
       <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-5">
         <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
@@ -111,12 +175,16 @@ export function Home() {
             </span>
             <span className="text-sm text-slate-300">|</span>
             <span className="text-sm font-semibold text-slate-700">
-              Q{currentBatch * BATCH_SIZE + 1} &ndash; Q{Math.min((currentBatch + 1) * BATCH_SIZE, attempt.questions.length)}
+              Q{currentBatch * attempt.batchSize + 1} &ndash; Q
+              {Math.min((currentBatch + 1) * attempt.batchSize, attempt.questions.length)}
             </span>
           </div>
           <div className="flex items-center gap-4">
             <span className="text-sm text-slate-500">
-              Answered: <span className="font-semibold text-slate-700">{batchAnswered}/{batchQuestions.length}</span>
+              Answered:{" "}
+              <span className="font-semibold text-slate-700">
+                {batchAnswered}/{batchQuestions.length}
+              </span>
             </span>
             {isSubmitted && (
               <span className="text-sm font-semibold text-emerald-600">
@@ -125,7 +193,6 @@ export function Home() {
             )}
           </div>
         </div>
-        {/* Progress Bar */}
         <div className="w-full bg-slate-100 rounded-full h-2 overflow-hidden">
           <div
             className="h-full rounded-full transition-all duration-300 bg-indigo-500"
@@ -137,7 +204,7 @@ export function Home() {
       {/* Question Cards */}
       <div className="space-y-5">
         {batchQuestions.map((q, idx) => {
-          const globalIdx = currentBatch * BATCH_SIZE + idx;
+          const globalIdx = currentBatch * attempt.batchSize + idx;
           const selected = attempt.answers[globalIdx];
 
           return (
@@ -145,7 +212,6 @@ export function Home() {
               key={q.id}
               className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden"
             >
-              {/* Question text */}
               <div className="p-4 sm:p-5 pb-0">
                 <h3 className="text-slate-800 text-base sm:text-lg font-semibold leading-relaxed">
                   <span className="text-indigo-500 font-bold mr-2">{globalIdx + 1}.</span>
@@ -153,7 +219,6 @@ export function Home() {
                 </h3>
               </div>
 
-              {/* Options */}
               <div className="p-4 sm:p-5 space-y-2.5">
                 {q.options.map((opt, optIdx) => {
                   const isSelected = selected === optIdx;
@@ -172,9 +237,11 @@ export function Home() {
                       btnClass += "border-slate-200 bg-white text-slate-600";
                     }
                   } else if (isSelected) {
-                    btnClass += "border-indigo-400 bg-indigo-50 text-indigo-700 cursor-pointer hover:bg-indigo-50";
+                    btnClass +=
+                      "border-indigo-400 bg-indigo-50 text-indigo-700 cursor-pointer hover:bg-indigo-50";
                   } else {
-                    btnClass += "border-slate-200 bg-white text-slate-700 cursor-pointer hover:border-slate-300 hover:bg-slate-50";
+                    btnClass +=
+                      "border-slate-200 bg-white text-slate-700 cursor-pointer hover:border-slate-300 hover:bg-slate-50";
                   }
 
                   const labelClass = isCorrectOpt
@@ -213,7 +280,6 @@ export function Home() {
                 })}
               </div>
 
-              {/* Clinical Explanation */}
               {isSubmitted && (
                 <div className="mx-4 sm:mx-5 mb-4 sm:mb-5 p-3 sm:p-4 rounded-xl bg-blue-50/70 border border-blue-200">
                   <div className="flex items-start gap-2">
@@ -234,7 +300,6 @@ export function Home() {
         })}
       </div>
 
-      {/* Submit Batch button */}
       {!isSubmitted && (
         <div className="flex justify-end">
           <button
@@ -250,7 +315,7 @@ export function Home() {
       <div className="flex items-center justify-between pt-2 pb-4">
         <button
           disabled={currentBatch === 0}
-          onClick={() => goToBatch(currentBatch - 1)}
+          onClick={() => handleBatchChange(currentBatch - 1)}
           className="px-4 py-2 rounded-lg border border-slate-300 bg-white text-slate-700 text-sm font-medium transition-colors hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           &larr; Previous Batch
@@ -260,7 +325,7 @@ export function Home() {
         </span>
         <button
           disabled={currentBatch >= totalBatches - 1}
-          onClick={() => goToBatch(currentBatch + 1)}
+          onClick={() => handleBatchChange(currentBatch + 1)}
           className="px-4 py-2 rounded-lg border border-slate-300 bg-white text-slate-700 text-sm font-medium transition-colors hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           Next Batch &rarr;
