@@ -9,10 +9,10 @@ import {
 import type { QuizAttempt } from "../hooks/useQuizStorage";
 import type { UserProfile } from "../hooks/useProfileStorage";
 import {
-  getAllProfiles,
-  getActiveProfile,
-  createProfile,
-  deleteProfile,
+  subscribeProfiles,
+  fetchProfileOnce,
+  createProfile as fbCreateProfile,
+  deleteProfile as fbDeleteProfile,
   setActiveProfileId,
   updateProfileAttempt,
   touchProfileLastActive,
@@ -23,81 +23,93 @@ interface ProfileContextValue {
   profiles: UserProfile[];
   activeProfile: UserProfile | null;
   selectProfile: (id: string) => void;
-  addProfile: (name: string, avatar: string, color: string) => UserProfile;
+  addProfile: (name: string, avatar: string, color: string) => Promise<void>;
   removeProfile: (id: string) => void;
   updateAttempt: (attempt: QuizAttempt) => void;
   touchActive: () => void;
   logout: () => void;
+  loading: boolean;
 }
 
 const ProfileContext = createContext<ProfileContextValue | null>(null);
 
 export function ProfileProvider({ children }: { children: ReactNode }) {
-  const [profiles, setProfiles] = useState<UserProfile[]>(() => getAllProfiles());
-  const [activeProfile, setActiveProfile] = useState<UserProfile | null>(() => getActiveProfile());
-  const [initialised, setInitialised] = useState(false);
+  const [profiles, setProfiles] = useState<UserProfile[]>([]);
+  const [activeProfile, setActiveProfile] = useState<UserProfile | null>(null);
+  const [loading, setLoading] = useState(true);
 
+  // Real-time Firestore subscription
   useEffect(() => {
-    // Clear old session keys once on mount
-    clearOldStorageKeys();
-    setInitialised(true);
+    const unsub = subscribeProfiles((all) => {
+      setProfiles(all);
+      setLoading(false);
+    });
+    return () => unsub();
   }, []);
 
-  // Re-read from localStorage when document is focused (cross-tab sync)
+  // Resolve active profile from localStorage ID whenever profiles change
   useEffect(() => {
-    const sync = () => {
-      setProfiles(getAllProfiles());
-      setActiveProfile(getActiveProfile());
-    };
-    window.addEventListener("focus", sync);
-    return () => window.removeEventListener("focus", sync);
-  }, []);
+    const activeId = localStorage.getItem("mls_active_profile_id");
+    if (!activeId || profiles.length === 0) {
+      if (!activeId) setActiveProfile(null);
+      return;
+    }
+    const match = profiles.find((p) => p.id === activeId);
+    if (match) {
+      setActiveProfile(match);
+    } else {
+      // Profile was deleted remotely; clear the stored ID
+      setActiveProfileId(null);
+      setActiveProfile(null);
+    }
+  }, [profiles]);
 
-  const selectProfile = useCallback((id: string) => {
-    setActiveProfileId(id);
-    setActiveProfile(getActiveProfile());
-    setProfiles(getAllProfiles());
-  }, []);
+  const selectProfile = useCallback(
+    (id: string) => {
+      setActiveProfileId(id);
+      const match = profiles.find((p) => p.id === id);
+      setActiveProfile(match ?? null);
+    },
+    [profiles]
+  );
 
-  const addProfile = useCallback((name: string, avatar: string, color: string) => {
-    const profile = createProfile(name, avatar, color);
-    setProfiles(getAllProfiles());
-    setActiveProfile(profile);
-    return profile;
-  }, []);
+  const addProfile = useCallback(
+    async (name: string, avatar: string, color: string) => {
+      const profile = await fbCreateProfile(name, avatar, color);
+      // Optimistically set active so navigation works immediately
+      setActiveProfile(profile);
+    },
+    []
+  );
 
-  const removeProfile = useCallback((id: string) => {
-    deleteProfile(id);
-    const remaining = getAllProfiles();
-    setProfiles(remaining);
-    const active = getActiveProfile();
-    setActiveProfile(active);
-  }, []);
+  const removeProfile = useCallback(
+    async (id: string) => {
+      await fbDeleteProfile(id);
+      // Firestore snapshot handles state cleanup
+    },
+    []
+  );
 
-  const updateAttempt = useCallback((attempt: QuizAttempt) => {
-    const id = getActiveProfile()?.id;
+  const updateAttempt = useCallback(
+    async (attempt: QuizAttempt) => {
+      const id = activeProfile?.id;
+      if (!id) return;
+      await updateProfileAttempt(id, attempt);
+      // Snapshot picks up changes
+    },
+    [activeProfile]
+  );
+
+  const touchActive = useCallback(async () => {
+    const id = activeProfile?.id;
     if (!id) return;
-    updateProfileAttempt(id, attempt);
-    setProfiles(getAllProfiles());
-    setActiveProfile(getActiveProfile());
-  }, []);
-
-  const touchActive = useCallback(() => {
-    const id = getActiveProfile()?.id;
-    if (!id) return;
-    touchProfileLastActive(id);
-    setProfiles(getAllProfiles());
-  }, []);
+    await touchProfileLastActive(id);
+  }, [activeProfile]);
 
   const logout = useCallback(() => {
     setActiveProfileId(null);
     setActiveProfile(null);
-    setProfiles(getAllProfiles());
   }, []);
-
-  if (!initialised) {
-    return null;
-  }
 
   return (
     <ProfileContext.Provider
@@ -110,6 +122,7 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
         updateAttempt,
         touchActive,
         logout,
+        loading,
       }}
     >
       {children}

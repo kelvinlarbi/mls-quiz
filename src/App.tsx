@@ -4,7 +4,7 @@ import { useProfile } from "./contexts/ProfileContext";
 import { ProfileSelector } from "./components/ProfileSelector";
 
 export function App() {
-  const { profiles, activeProfile, selectProfile, addProfile, logout } = useProfile();
+  const { profiles, activeProfile, selectProfile, addProfile, logout, loading } = useProfile();
   const navigate = useNavigate();
   const [switcherOpen, setSwitcherOpen] = useState(false);
   const switcherRef = useRef<HTMLDivElement>(null);
@@ -21,6 +21,15 @@ export function App() {
     return () => document.removeEventListener("mousedown", handler);
   }, [switcherOpen]);
 
+  // Loading from Firestore
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <p className="text-slate-400 text-lg">Loading profiles...</p>
+      </div>
+    );
+  }
+
   // No active profile → show selector
   if (!activeProfile) {
     return (
@@ -30,8 +39,8 @@ export function App() {
           selectProfile(id);
           navigate("/");
         }}
-        onCreate={(name, avatar, color) => {
-          addProfile(name, avatar, color);
+        onCreate={async (name, avatar, color) => {
+          await addProfile(name, avatar, color);
           navigate("/");
         }}
       />

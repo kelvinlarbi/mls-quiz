@@ -1,4 +1,15 @@
 import type { QuizAttempt } from "./useQuizStorage";
+import {
+  doc,
+  getDoc,
+  getDocs,
+  setDoc,
+  deleteDoc,
+  collection,
+  onSnapshot,
+  type Unsubscribe,
+} from "firebase/firestore";
+import { db } from "../firebase";
 
 export interface UserProfile {
   id: string;
@@ -10,26 +21,17 @@ export interface UserProfile {
   attempt: QuizAttempt | null;
 }
 
-const PROFILES_KEY = "mls_app_profiles";
+const PROFILES_COLLECTION = "profiles";
 const ACTIVE_KEY = "mls_active_profile_id";
 
-/* ---------- helpers ---------- */
-
-function loadProfiles(): UserProfile[] {
-  try {
-    const raw = localStorage.getItem(PROFILES_KEY);
-    return raw ? JSON.parse(raw) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveProfiles(profiles: UserProfile[]): void {
-  localStorage.setItem(PROFILES_KEY, JSON.stringify(profiles));
-}
+/* ---------- localStorage helpers (active ID only) ---------- */
 
 function loadActiveId(): string | null {
-  return localStorage.getItem(ACTIVE_KEY);
+  try {
+    return localStorage.getItem(ACTIVE_KEY);
+  } catch {
+    return null;
+  }
 }
 
 function saveActiveId(id: string | null): void {
@@ -40,40 +42,94 @@ function saveActiveId(id: string | null): void {
   }
 }
 
-/* ---------- public API ---------- */
+/* ---------- Firestore helpers ---------- */
 
-export function getAllProfiles(): UserProfile[] {
-  return loadProfiles();
+function profileDoc(id: string) {
+  return doc(db, PROFILES_COLLECTION, id);
 }
 
-export function getActiveProfile(): UserProfile | null {
-  const id = loadActiveId();
-  if (!id) return null;
-  const profiles = loadProfiles();
-  return profiles.find((p) => p.id === id) ?? null;
+function profileData(profile: UserProfile): Record<string, unknown> {
+  return {
+    name: profile.name,
+    avatar: profile.avatar,
+    color: profile.color,
+    createdAt: profile.createdAt,
+    lastActive: profile.lastActive,
+    attempt: profile.attempt,
+  };
 }
 
-export function createProfile(name: string, avatar: string, color: string): UserProfile {
+function parseDoc(id: string, data: Record<string, unknown>): UserProfile {
+  return {
+    id,
+    name: data.name as string,
+    avatar: data.avatar as string,
+    color: data.color as string,
+    createdAt: (data.createdAt as number) ?? Date.now(),
+    lastActive: (data.lastActive as number) ?? Date.now(),
+    attempt: (data.attempt as QuizAttempt) ?? null,
+  };
+}
+
+/* ---------- Public API ---------- */
+
+export function subscribeProfiles(
+  onProfiles: (profiles: UserProfile[]) => void
+): Unsubscribe {
+  const col = collection(db, PROFILES_COLLECTION);
+  return onSnapshot(col, (snapshot) => {
+    const profiles: UserProfile[] = [];
+    snapshot.forEach((snap) => {
+      profiles.push(parseDoc(snap.id, snap.data() as Record<string, unknown>));
+    });
+    profiles.sort((a, b) => b.lastActive - a.lastActive);
+    onProfiles(profiles);
+  });
+}
+
+export async function fetchProfilesOnce(): Promise<UserProfile[]> {
+  const col = collection(db, PROFILES_COLLECTION);
+  const snapshot = await getDocs(col);
+  const profiles: UserProfile[] = [];
+  snapshot.forEach((snap) => {
+    profiles.push(parseDoc(snap.id, snap.data() as Record<string, unknown>));
+  });
+  profiles.sort((a, b) => b.lastActive - a.lastActive);
+  return profiles;
+}
+
+export async function fetchProfileOnce(
+  id: string
+): Promise<UserProfile | null> {
+  const ref = profileDoc(id);
+  const snap = await getDoc(ref);
+  if (!snap.exists()) return null;
+  return parseDoc(snap.id, snap.data() as Record<string, unknown>);
+}
+
+export async function createProfile(
+  name: string,
+  avatar: string,
+  color: string
+): Promise<UserProfile> {
+  const id = crypto.randomUUID?.() ?? Date.now().toString(36);
+  const now = Date.now();
   const profile: UserProfile = {
-    id: crypto.randomUUID?.() ?? Date.now().toString(36),
+    id,
     name,
     avatar,
     color,
-    createdAt: Date.now(),
-    lastActive: Date.now(),
+    createdAt: now,
+    lastActive: now,
     attempt: null,
   };
-  const profiles = loadProfiles();
-  profiles.push(profile);
-  saveProfiles(profiles);
-  saveActiveId(profile.id);
+  await setDoc(profileDoc(id), profileData(profile));
+  saveActiveId(id);
   return profile;
 }
 
-export function deleteProfile(id: string): void {
-  let profiles = loadProfiles();
-  profiles = profiles.filter((p) => p.id !== id);
-  saveProfiles(profiles);
+export async function deleteProfile(id: string): Promise<void> {
+  await deleteDoc(profileDoc(id));
   const activeId = loadActiveId();
   if (activeId === id) {
     saveActiveId(null);
@@ -84,20 +140,19 @@ export function setActiveProfileId(id: string | null): void {
   saveActiveId(id);
 }
 
-export function updateProfileAttempt(profileId: string, attempt: QuizAttempt): void {
-  const profiles = loadProfiles();
-  const idx = profiles.findIndex((p) => p.id === profileId);
-  if (idx === -1) return;
-  profiles[idx] = { ...profiles[idx], attempt, lastActive: Date.now() };
-  saveProfiles(profiles);
+export async function updateProfileAttempt(
+  profileId: string,
+  attempt: QuizAttempt
+): Promise<void> {
+  const ref = profileDoc(profileId);
+  await setDoc(ref, { attempt, lastActive: Date.now() }, { merge: true });
 }
 
-export function touchProfileLastActive(profileId: string): void {
-  const profiles = loadProfiles();
-  const idx = profiles.findIndex((p) => p.id === profileId);
-  if (idx === -1) return;
-  profiles[idx].lastActive = Date.now();
-  saveProfiles(profiles);
+export async function touchProfileLastActive(
+  profileId: string
+): Promise<void> {
+  const ref = profileDoc(profileId);
+  await setDoc(ref, { lastActive: Date.now() }, { merge: true });
 }
 
 export function clearOldStorageKeys(): void {

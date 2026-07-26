@@ -25,10 +25,17 @@ export function Home() {
   const [loading, setLoading] = useState(true);
   const [currentBatch, setCurrentBatchLocal] = useState(0);
   const topRef = useRef<HTMLDivElement>(null);
+  const profileIdRef = useRef<string | null>(null);
 
   // Sync attempt from profile on mount & whenever activeProfile changes
   useEffect(() => {
     if (!activeProfile) return;
+
+    // Prevent re-sync when Firestore snapshot re-fires the same profile
+    if (profileIdRef.current === activeProfile.id && activeProfile.attempt) {
+      return;
+    }
+    profileIdRef.current = activeProfile.id;
 
     if (activeProfile.attempt) {
       setAttempt(activeProfile.attempt);
